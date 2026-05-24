@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Build a bare-metal RISC-V GCC cross-toolchain from GNU mainline sources.
+# Build bare-metal RISC-V GCC cross-toolchains from GNU mainline sources.
 # Components: binutils-2.32, gcc-9.2.0, newlib-3.1.0
 # Supported hosts: Linux, macOS (Intel or Apple Silicon).
+# Builds one or more target triples (e.g. riscv64-unknown-elf, riscv32-unknown-elf)
+# into a shared PREFIX so both `riscv32-*` and `riscv64-*` command sets coexist.
 set -euo pipefail
 
 # ---- Host detection ----
@@ -19,16 +21,26 @@ detect_jobs() {
   fi
 }
 
+# ---- Layout (computed early so PREFIX can default to a project-local path) ----
+WORK="$(cd "$(dirname "$0")" && pwd)"
+
 # ---- Configurable knobs (override via env) ----
-PREFIX="${PREFIX:-$HOME/.local/gcc-9.2.0-riscv}"
-TARGET="${TARGET:-riscv64-unknown-elf}"
-ARCH="${ARCH:-rv64gc}"
-ABI="${ABI:-lp64d}"
+PREFIX="${PREFIX:-$WORK/temp}"
 JOBS="${JOBS:-$(detect_jobs)}"
 
 GCC_VER="${GCC_VER:-9.2.0}"
 BINUTILS_VER="${BINUTILS_VER:-2.32}"
 NEWLIB_VER="${NEWLIB_VER:-3.1.0}"
+
+# Target specs: each entry is "TARGET|ARCH|ABI|MULTILIB_GEN".
+# MULTILIB_GEN syntax: "<arch>-<abi>--;..." (trailing "--" = no extra flags).
+# Override by exporting TARGETS as a bash array before running.
+if [ -z "${TARGETS+x}" ]; then
+  TARGETS=(
+    "riscv64-unknown-elf|rv64gc|lp64d|rv32imac-ilp32--;rv32imafdc-ilp32d--;rv64imac-lp64--;rv64imafdc-lp64d--"
+    "riscv32-unknown-elf|rv32gc|ilp32d|rv32imac-ilp32--;rv32imafc-ilp32f--;rv32imafdc-ilp32d--"
+  )
+fi
 
 # ---- macOS host setup ----
 # GCC 9.2 predates Apple Silicon / modern Xcode SDKs. Point the build at the
@@ -47,8 +59,7 @@ if [ "$IS_MAC" -eq 1 ]; then
   export CXXFLAGS="${CXXFLAGS:-} $HOST_C_COMPAT"
 fi
 
-# ---- Layout ----
-WORK="$(cd "$(dirname "$0")" && pwd)"
+# ---- Layout (cont.) ----
 SRC="$WORK/src"
 BUILD="$WORK/build"
 LOG="$WORK/log"
@@ -65,15 +76,20 @@ log() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 have_stamp() { [ -f "$STAMP/$1" ]; }
 mark() { touch "$STAMP/$1"; }
 
-run() {
-  local name="$1"; shift
-  log "$name"
-  if "$@" 2>&1 | tee "$LOG/$name.log"; then
-    return 0
-  else
-    echo "FAILED: $name. See $LOG/$name.log"
-    return 1
-  fi
+# gcc-9.2.0 does NOT honor --with-multilib-generator at configure time.
+# To set the multilib set, regenerate gcc/config/riscv/t-elf-multilib in the
+# src tree before configuring. The stock file ships with both rv32 and rv64
+# variants, which breaks a riscv32-* toolchain (libstdc++ install fails when
+# building for rv64 multilibs under a riscv32 default target).
+write_multilib_config() {
+  local multilib_gen="$1"
+  local generator="$SRC/gcc-${GCC_VER}/gcc/config/riscv/multilib-generator"
+  local out="$SRC/gcc-${GCC_VER}/gcc/config/riscv/t-elf-multilib"
+  local backup="${out}.orig"
+  [ -f "$backup" ] || cp "$out" "$backup"
+  local -a args
+  IFS=';' read -ra args <<<"$multilib_gen"
+  python3 "$generator" "${args[@]}" > "$out"
 }
 
 # ---- Phase 1: download sources in parallel ----
@@ -137,38 +153,43 @@ phase_prereqs() {
 
 export PATH="$PREFIX/bin:$PATH"
 
-# ---- Phase 4: binutils ----
+# ---- Phase 4: binutils (per target) ----
 phase_binutils() {
-  if have_stamp binutils; then log "binutils: cached"; return 0; fi
-  log "configure + build binutils-${BINUTILS_VER}"
-  rm -rf "$BUILD/binutils"
-  mkdir -p "$BUILD/binutils"
-  cd "$BUILD/binutils"
+  local target="$1"
+  local stamp="binutils-$target"
+  if have_stamp "$stamp"; then log "binutils ($target): cached"; return 0; fi
+  log "configure + build binutils-${BINUTILS_VER} for $target"
+  rm -rf "$BUILD/binutils-$target"
+  mkdir -p "$BUILD/binutils-$target"
+  cd "$BUILD/binutils-$target"
   "$SRC/binutils-${BINUTILS_VER}/configure" \
-      --target="$TARGET" \
+      --target="$target" \
       --prefix="$PREFIX" \
       --with-sysroot \
       --with-system-zlib \
       --disable-nls \
       --disable-werror \
-      --disable-multilib
+      --enable-multilib
   make -j"$JOBS"
   make install
-  mark binutils
+  mark "$stamp"
 }
 
 # ---- Phase 5: gcc stage 1 (compiler only, no libc) ----
 phase_gcc_stage1() {
-  if have_stamp gcc_stage1; then log "gcc stage1: cached"; return 0; fi
-  log "configure + build gcc-${GCC_VER} stage 1"
-  rm -rf "$BUILD/gcc-stage1"
-  mkdir -p "$BUILD/gcc-stage1"
-  cd "$BUILD/gcc-stage1"
+  local target="$1" arch="$2" abi="$3" multilib="$4"
+  local stamp="gcc_stage1-$target"
+  if have_stamp "$stamp"; then log "gcc stage1 ($target): cached"; return 0; fi
+  log "configure + build gcc-${GCC_VER} stage 1 for $target"
+  write_multilib_config "$multilib"
+  rm -rf "$BUILD/gcc-stage1-$target"
+  mkdir -p "$BUILD/gcc-stage1-$target"
+  cd "$BUILD/gcc-stage1-$target"
   "$SRC/gcc-${GCC_VER}/configure" \
-      --target="$TARGET" \
+      --target="$target" \
       --prefix="$PREFIX" \
-      --with-arch="$ARCH" \
-      --with-abi="$ABI" \
+      --with-arch="$arch" \
+      --with-abi="$abi" \
       --without-headers \
       --with-newlib \
       --with-system-zlib \
@@ -183,23 +204,25 @@ phase_gcc_stage1() {
       --disable-decimal-float \
       --disable-nls \
       --disable-bootstrap \
-      --disable-multilib
+      --enable-multilib
   make -j"$JOBS" all-gcc
   make install-gcc
   make -j"$JOBS" all-target-libgcc
   make install-target-libgcc
-  mark gcc_stage1
+  mark "$stamp"
 }
 
-# ---- Phase 6: newlib ----
+# ---- Phase 6: newlib (per target) ----
 phase_newlib() {
-  if have_stamp newlib; then log "newlib: cached"; return 0; fi
-  log "configure + build newlib-${NEWLIB_VER}"
-  rm -rf "$BUILD/newlib"
-  mkdir -p "$BUILD/newlib"
-  cd "$BUILD/newlib"
+  local target="$1"
+  local stamp="newlib-$target"
+  if have_stamp "$stamp"; then log "newlib ($target): cached"; return 0; fi
+  log "configure + build newlib-${NEWLIB_VER} for $target"
+  rm -rf "$BUILD/newlib-$target"
+  mkdir -p "$BUILD/newlib-$target"
+  cd "$BUILD/newlib-$target"
   "$SRC/newlib-${NEWLIB_VER}/configure" \
-      --target="$TARGET" \
+      --target="$target" \
       --prefix="$PREFIX" \
       --disable-newlib-supplied-syscalls \
       --enable-newlib-reent-small \
@@ -211,24 +234,28 @@ phase_newlib() {
       --enable-lite-exit \
       --enable-newlib-global-atexit \
       --enable-newlib-nano-formatted-io \
+      --enable-multilib \
       --disable-nls
   make -j"$JOBS"
   make install
-  mark newlib
+  mark "$stamp"
 }
 
 # ---- Phase 7: gcc final (C + C++ with newlib) ----
 phase_gcc_final() {
-  if have_stamp gcc_final; then log "gcc final: cached"; return 0; fi
-  log "configure + build gcc-${GCC_VER} final"
-  rm -rf "$BUILD/gcc-final"
-  mkdir -p "$BUILD/gcc-final"
-  cd "$BUILD/gcc-final"
+  local target="$1" arch="$2" abi="$3" multilib="$4"
+  local stamp="gcc_final-$target"
+  if have_stamp "$stamp"; then log "gcc final ($target): cached"; return 0; fi
+  log "configure + build gcc-${GCC_VER} final for $target"
+  write_multilib_config "$multilib"
+  rm -rf "$BUILD/gcc-final-$target"
+  mkdir -p "$BUILD/gcc-final-$target"
+  cd "$BUILD/gcc-final-$target"
   "$SRC/gcc-${GCC_VER}/configure" \
-      --target="$TARGET" \
+      --target="$target" \
       --prefix="$PREFIX" \
-      --with-arch="$ARCH" \
-      --with-abi="$ABI" \
+      --with-arch="$arch" \
+      --with-abi="$abi" \
       --with-newlib \
       --with-system-zlib \
       --enable-languages=c,c++ \
@@ -238,13 +265,13 @@ phase_gcc_final() {
       --disable-libgomp \
       --disable-nls \
       --disable-bootstrap \
-      --disable-multilib
+      --enable-multilib
   make -j"$JOBS"
   make install
-  mark gcc_final
+  mark "$stamp"
 }
 
-# ---- Phase 8: smoke test ----
+# ---- Phase 8: smoke test (per target, using its default arch/abi) ----
 phase_smoke() {
   log "smoke test"
   local tmp; tmp="$(mktemp -d)"
@@ -252,34 +279,45 @@ phase_smoke() {
 #include <stdio.h>
 int main(void) { printf("hello, riscv\n"); return 0; }
 EOF
-  "$PREFIX/bin/${TARGET}-gcc" -O2 -march="$ARCH" -mabi="$ABI" \
-      "$tmp/hello.c" -o "$tmp/hello.elf"
-  file "$tmp/hello.elf"
-  "$PREFIX/bin/${TARGET}-objdump" -d "$tmp/hello.elf" 2>&1 | sed -n '1,20p'
   cat > "$tmp/hello.cpp" <<'EOF'
 #include <cstdio>
 int main() { std::printf("hello, riscv c++\n"); return 0; }
 EOF
-  "$PREFIX/bin/${TARGET}-g++" -O2 -march="$ARCH" -mabi="$ABI" \
-      "$tmp/hello.cpp" -o "$tmp/hello-cpp.elf"
-  file "$tmp/hello-cpp.elf"
+  local spec target arch abi
+  for spec in "${TARGETS[@]}"; do
+    IFS='|' read -r target arch abi _ <<<"$spec"
+    log "smoke test: ${target} default (${arch}/${abi}) — no -march/-mabi"
+    "$PREFIX/bin/${target}-gcc" -O2 "$tmp/hello.c" -o "$tmp/hello-${target}.elf"
+    file "$tmp/hello-${target}.elf"
+    "$PREFIX/bin/${target}-g++" -O2 "$tmp/hello.cpp" -o "$tmp/hello-cpp-${target}.elf"
+    file "$tmp/hello-cpp-${target}.elf"
+    log "available multilibs (${target})"
+    "$PREFIX/bin/${target}-gcc" -print-multi-lib
+  done
   rm -rf "$tmp"
 }
 
 # ---- Driver ----
 main() {
 set -x
-  log "PREFIX=$PREFIX  TARGET=$TARGET  ARCH=$ARCH  ABI=$ABI  JOBS=$JOBS"
+  log "PREFIX=$PREFIX  JOBS=$JOBS  TARGETS=${TARGETS[*]}"
   phase_download
   phase_extract
   phase_prereqs
-  phase_binutils
-  phase_gcc_stage1
-  phase_newlib
-  phase_gcc_final
+  local spec target arch abi multilib
+  for spec in "${TARGETS[@]}"; do
+    IFS='|' read -r target arch abi multilib <<<"$spec"
+    phase_binutils  "$target"
+    phase_gcc_stage1 "$target" "$arch" "$abi" "$multilib"
+    phase_newlib    "$target"
+    phase_gcc_final  "$target" "$arch" "$abi" "$multilib"
+  done
   phase_smoke
-  log "DONE: toolchain installed in $PREFIX"
-  ls "$PREFIX/bin" | grep "^${TARGET}" | head
+  log "DONE: toolchain(s) installed in $PREFIX"
+  for spec in "${TARGETS[@]}"; do
+    IFS='|' read -r target _ _ _ <<<"$spec"
+    ls "$PREFIX/bin" | grep "^${target}" | head
+  done
 set +x
 }
 
