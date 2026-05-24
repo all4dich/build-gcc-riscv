@@ -76,17 +76,38 @@ log() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 have_stamp() { [ -f "$STAMP/$1" ]; }
 mark() { touch "$STAMP/$1"; }
 
+# Per-target gcc src tree path. Targets build in parallel, and each gcc
+# configure mutates gcc/config/riscv/t-elf-multilib (see write_multilib_config
+# below), so the trees must be separate to avoid a race.
+target_src() { echo "$SRC/gcc-${GCC_VER}-$1"; }
+
+# Hardlink-copy the shared gcc src tree to a per-target tree.
+# Hardlinks are cheap (sub-second, ~no extra disk); we only de-hardlink the
+# files we will overwrite (currently just t-elf-multilib).
+setup_target_src() {
+  local target="$1"
+  local src_dir; src_dir="$(target_src "$target")"
+  local shared="$SRC/gcc-${GCC_VER}"
+  if [ ! -d "$src_dir" ]; then
+    log "preparing per-target gcc src tree for $target"
+    cp -al "$shared" "$src_dir"
+    # Break the hardlink for t-elf-multilib so a per-target rewrite doesn't
+    # clobber the other target's tree.
+    local mf="$src_dir/gcc/config/riscv/t-elf-multilib"
+    cp --remove-destination "$shared/gcc/config/riscv/t-elf-multilib" "$mf"
+  fi
+}
+
 # gcc-9.2.0 does NOT honor --with-multilib-generator at configure time.
 # To set the multilib set, regenerate gcc/config/riscv/t-elf-multilib in the
-# src tree before configuring. The stock file ships with both rv32 and rv64
-# variants, which breaks a riscv32-* toolchain (libstdc++ install fails when
-# building for rv64 multilibs under a riscv32 default target).
+# (per-target) src tree before configuring. The stock file ships with both
+# rv32 and rv64 variants, which breaks a riscv32-* toolchain (libstdc++
+# install fails when building for rv64 multilibs under a riscv32 default).
 write_multilib_config() {
-  local multilib_gen="$1"
-  local generator="$SRC/gcc-${GCC_VER}/gcc/config/riscv/multilib-generator"
-  local out="$SRC/gcc-${GCC_VER}/gcc/config/riscv/t-elf-multilib"
-  local backup="${out}.orig"
-  [ -f "$backup" ] || cp "$out" "$backup"
+  local target="$1" multilib_gen="$2"
+  local src_dir; src_dir="$(target_src "$target")"
+  local generator="$src_dir/gcc/config/riscv/multilib-generator"
+  local out="$src_dir/gcc/config/riscv/t-elf-multilib"
   local -a args
   IFS=';' read -ra args <<<"$multilib_gen"
   python3 "$generator" "${args[@]}" > "$out"
@@ -181,11 +202,13 @@ phase_gcc_stage1() {
   local stamp="gcc_stage1-$target"
   if have_stamp "$stamp"; then log "gcc stage1 ($target): cached"; return 0; fi
   log "configure + build gcc-${GCC_VER} stage 1 for $target"
-  write_multilib_config "$multilib"
+  setup_target_src "$target"
+  write_multilib_config "$target" "$multilib"
+  local src_dir; src_dir="$(target_src "$target")"
   rm -rf "$BUILD/gcc-stage1-$target"
   mkdir -p "$BUILD/gcc-stage1-$target"
   cd "$BUILD/gcc-stage1-$target"
-  "$SRC/gcc-${GCC_VER}/configure" \
+  "$src_dir/configure" \
       --target="$target" \
       --prefix="$PREFIX" \
       --with-arch="$arch" \
@@ -247,11 +270,13 @@ phase_gcc_final() {
   local stamp="gcc_final-$target"
   if have_stamp "$stamp"; then log "gcc final ($target): cached"; return 0; fi
   log "configure + build gcc-${GCC_VER} final for $target"
-  write_multilib_config "$multilib"
+  setup_target_src "$target"
+  write_multilib_config "$target" "$multilib"
+  local src_dir; src_dir="$(target_src "$target")"
   rm -rf "$BUILD/gcc-final-$target"
   mkdir -p "$BUILD/gcc-final-$target"
   cd "$BUILD/gcc-final-$target"
-  "$SRC/gcc-${GCC_VER}/configure" \
+  "$src_dir/configure" \
       --target="$target" \
       --prefix="$PREFIX" \
       --with-arch="$arch" \
@@ -297,28 +322,71 @@ EOF
   rm -rf "$tmp"
 }
 
+# Build the four target-specific phases for one TARGETS spec.
+# Used by main() under `&` to run targets in parallel.
+build_target() {
+  local spec="$1"
+  local target arch abi multilib
+  IFS='|' read -r target arch abi multilib <<<"$spec"
+  phase_binutils  "$target"
+  phase_gcc_stage1 "$target" "$arch" "$abi" "$multilib"
+  phase_newlib    "$target"
+  phase_gcc_final  "$target" "$arch" "$abi" "$multilib"
+}
+
 # ---- Driver ----
 main() {
-set -x
   log "PREFIX=$PREFIX  JOBS=$JOBS  TARGETS=${TARGETS[*]}"
+
+  # Surface where build/ lives. tmpfs is dramatically faster for the many-
+  # small-files I/O of gcc/libstdc++ builds.
+  if mount | grep -qE " on $BUILD type tmpfs"; then
+    log "build/ is on tmpfs (fast)"
+  else
+    log "build/ is on disk; for ~2-4 min faster builds, mount tmpfs:
+       sudo mount -t tmpfs -o size=20G tmpfs $BUILD"
+  fi
+
   phase_download
   phase_extract
   phase_prereqs
-  local spec target arch abi multilib
+
+  # Per-target builds run in parallel. Each writes to its own per-target
+  # gcc src tree (see setup_target_src) so configure's t-elf-multilib
+  # mutation doesn't race. Install paths are per-target inside $PREFIX,
+  # so make-install doesn't conflict either.
+  local spec pids=() targets=()
   for spec in "${TARGETS[@]}"; do
-    IFS='|' read -r target arch abi multilib <<<"$spec"
-    phase_binutils  "$target"
-    phase_gcc_stage1 "$target" "$arch" "$abi" "$multilib"
-    phase_newlib    "$target"
-    phase_gcc_final  "$target" "$arch" "$abi" "$multilib"
+    local target
+    IFS='|' read -r target _ _ _ <<<"$spec"
+    targets+=("$target")
+    local log_file="$LOG/build-$target.log"
+    log "[parallel] $target -> $log_file"
+    ( build_target "$spec" ) >"$log_file" 2>&1 &
+    pids+=($!)
   done
+
+  # Wait on each, accumulate failures, print log tail for any that failed.
+  local fail=0 i=0 pid
+  for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then
+      echo "FAILED: ${targets[$i]} (see $LOG/build-${targets[$i]}.log; tail below)" >&2
+      tail -40 "$LOG/build-${targets[$i]}.log" >&2 || true
+      fail=1
+    else
+      log "[parallel] ${targets[$i]} done"
+    fi
+    i=$((i+1))
+  done
+  [ "$fail" -eq 0 ] || exit 1
+
   phase_smoke
   log "DONE: toolchain(s) installed in $PREFIX"
   for spec in "${TARGETS[@]}"; do
+    local target
     IFS='|' read -r target _ _ _ <<<"$spec"
     ls "$PREFIX/bin" | grep "^${target}" | head
   done
-set +x
 }
 
 main "$@"
