@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build bare-metal RISC-V GCC cross-toolchains from GNU mainline sources.
-# Components: binutils-2.32, gcc-9.2.0, newlib-3.1.0
+# Default components: binutils-2.42, gcc-13.3.0, newlib-3.1.0
+# (override via BINUTILS_VER / GCC_VER / NEWLIB_VER env vars)
 # Supported hosts: Linux, macOS (Intel or Apple Silicon).
 # Builds one or more target triples (e.g. riscv64-unknown-elf, riscv32-unknown-elf)
 # into a shared PREFIX so both `riscv32-*` and `riscv64-*` command sets coexist.
@@ -28,8 +29,8 @@ WORK="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${PREFIX:-$WORK/temp}"
 JOBS="${JOBS:-$(detect_jobs)}"
 
-GCC_VER="${GCC_VER:-9.2.0}"
-BINUTILS_VER="${BINUTILS_VER:-2.32}"
+GCC_VER="${GCC_VER:-13.3.0}"
+BINUTILS_VER="${BINUTILS_VER:-2.42}"
 NEWLIB_VER="${NEWLIB_VER:-3.1.0}"
 
 # Target specs: each entry is "TARGET|ARCH|ABI|MULTILIB_GEN".

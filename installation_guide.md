@@ -6,10 +6,12 @@ This repo builds two bare-metal RISC-V GCC cross-toolchains from upstream GNU so
 
 | Component | Version | Source |
 |---|---|---|
-| binutils  | 2.32  | https://ftp.gnu.org/gnu/binutils/ |
-| gcc       | 9.2.0 | https://ftp.gnu.org/gnu/gcc/      |
-| newlib    | 3.1.0 | https://sourceware.org/pub/newlib/ |
+| binutils  | 2.42   | https://ftp.gnu.org/gnu/binutils/ |
+| gcc       | 13.3.0 | https://ftp.gnu.org/gnu/gcc/      |
+| newlib    | 3.1.0  | https://sourceware.org/pub/newlib/ |
 | gcc prereqs | bundled | `gcc/contrib/download_prerequisites` (gmp/mpfr/mpc/isl) |
+
+Versions are overridable via `GCC_VER`, `BINUTILS_VER`, `NEWLIB_VER` env vars. The defaults are pinned to a known-good triple; binutils ≥ 2.41 is required for GCC 13 because the assembler/linker must understand the newer RISC-V relocations and instructions GCC emits.
 
 ## Host requirements
 
@@ -108,9 +110,9 @@ To start a target from scratch, remove all four of its stamps (`binutils-`, `gcc
 
 ## How multilib variants are actually controlled
 
-Stock gcc-9.2.0 **does not honor `--with-multilib-generator`** as a configure flag — it silently falls through to the default `gcc/config/riscv/t-elf-multilib` shipped in the tarball, which includes both rv32 and rv64 variants. `build.sh` works around this by regenerating that file in the src tree from the per-target `MULTILIB_GEN` spec before each gcc configure. The stock file is preserved as `t-elf-multilib.orig` after the first run.
+`build.sh` regenerates `gcc/config/riscv/t-elf-multilib` in the per-target src tree from each target's `MULTILIB_GEN` spec before configure. This is the workaround for an old gcc-9.2.0 quirk where `--with-multilib-generator` was silently ignored; it still works on gcc-13 (the file and `multilib-generator` script are in the same path) but is no longer strictly required — gcc-10+ accepts the configure flag natively. Keeping the regeneration approach avoids touching the multilib logic when bumping GCC versions.
 
-If you upgrade to a newer GCC where the flag is recognized natively (≥10 in some vendor trees), `write_multilib_config` and the in-place patching can be retired.
+If you want to retire the regeneration, replace `write_multilib_config` calls with `--with-multilib-generator="$multilib"` on the gcc configure lines.
 
 ## Known quirks
 

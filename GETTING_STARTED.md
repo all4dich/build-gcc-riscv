@@ -11,7 +11,7 @@ You're building firmware for a heterogeneous RISC-V system:
 
 The host is Ubuntu. There's no distro package that ships both `riscv32-unknown-elf-gcc` and `riscv64-unknown-elf-gcc` together with newlib + libstdc++ and the multilib variants you actually need (`rv32imac/ilp32` for the integer-only MCU SKU, `rv32imafdc/ilp32d` for the FPU SKU, `rv64gc/lp64d` for the app core). The riscv-gnu-toolchain meta-repo can build all of that, but it's heavy and version-pins things you don't always want.
 
-This repo's `build.sh` is the minimal alternative: pure upstream GNU tarballs (binutils-2.32, gcc-9.2.0, newlib-3.1.0), one shell script, two target triples, custom multilib lists per target, project-local install.
+This repo's `build.sh` is the minimal alternative: pure upstream GNU tarballs (binutils-2.42, gcc-13.3.0, newlib-3.1.0), one shell script, two target triples, custom multilib lists per target, project-local install.
 
 End result:
 
@@ -44,8 +44,8 @@ export PATH="$(pwd)/temp/bin:$PATH"
 Confirm:
 
 ```bash
-riscv32-unknown-elf-gcc --version    # gcc (GCC) 9.2.0
-riscv64-unknown-elf-gcc --version    # gcc (GCC) 9.2.0
+riscv32-unknown-elf-gcc --version    # gcc (GCC) 13.3.0
+riscv64-unknown-elf-gcc --version    # gcc (GCC) 13.3.0
 ```
 
 ## Step 3 — Write something for the MCU core (rv32)
@@ -154,7 +154,7 @@ You could use only `riscv64-unknown-elf-gcc -march=rv32... -mabi=ilp32...` for M
 
 ## When you change the build
 
-- **Change a target's multilib set:** edit the `TARGETS` array near the top of `build.sh`, delete that target's stamps (`.stamps/{binutils,gcc_stage1,newlib,gcc_final}-<target>`), and re-run. The script rewrites `src/gcc-9.2.0/gcc/config/riscv/t-elf-multilib` per target before each gcc configure (see the note in installation_guide.md about gcc-9.2.0's `--with-multilib-generator` being a no-op).
+- **Change a target's multilib set:** edit the `TARGETS` array near the top of `build.sh`, delete that target's stamps (`.stamps/{binutils,gcc_stage1,newlib,gcc_final}-<target>`), and re-run. The script rewrites `src/gcc-${GCC_VER}-<target>/gcc/config/riscv/t-elf-multilib` per target before each gcc configure (a workaround originally needed for gcc-9.2.0; harmless on newer GCC).
 - **Add a third target** (e.g., `riscv64-elf` without `-unknown-`): just append another `"target|arch|abi|multilibs"` entry to the array.
 - **Use a different install root:** `PREFIX=/opt/riscv ./build.sh`. By default it's the project-local `temp/` so the repo is self-contained and your home dir stays untouched.
 
