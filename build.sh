@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build bare-metal RISC-V GCC cross-toolchains from GNU mainline sources.
-# Default components: binutils-2.42, gcc-13.3.0, newlib-3.1.0
-# (override via BINUTILS_VER / GCC_VER / NEWLIB_VER env vars)
+# Default components: binutils-2.42, gcc-13.3.0, newlib-4.4.0, gdb-14.2
+# (override via BINUTILS_VER / GCC_VER / NEWLIB_VER / GDB_VER env vars)
 # Supported hosts: Linux, macOS (Intel or Apple Silicon).
 # Builds one or more target triples (e.g. riscv64-unknown-elf, riscv32-unknown-elf)
 # into a shared PREFIX so both `riscv32-*` and `riscv64-*` command sets coexist.
@@ -31,7 +31,8 @@ JOBS="${JOBS:-$(detect_jobs)}"
 
 GCC_VER="${GCC_VER:-13.3.0}"
 BINUTILS_VER="${BINUTILS_VER:-2.42}"
-NEWLIB_VER="${NEWLIB_VER:-3.1.0}"
+NEWLIB_VER="${NEWLIB_VER:-4.4.0.20231231}"
+GDB_VER="${GDB_VER:-14.2}"
 
 # Target specs: each entry is "TARGET|ARCH|ABI|MULTILIB_GEN".
 # MULTILIB_GEN syntax: "<arch>-<abi>--;..." (trailing "--" = no extra flags).
@@ -71,6 +72,7 @@ mkdir -p "$SRC" "$BUILD" "$LOG" "$STAMP" "$PREFIX"
 GCC_URL="https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz"
 BINUTILS_URL="https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VER}.tar.xz"
 NEWLIB_URL="https://sourceware.org/pub/newlib/newlib-${NEWLIB_VER}.tar.gz"
+GDB_URL="https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VER}.tar.xz"
 
 # ---- Helpers ----
 log() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
@@ -144,7 +146,9 @@ phase_download() {
   local p2=$!
   download "$NEWLIB_URL" &
   local p3=$!
-  wait $p1 $p2 $p3
+  download "$GDB_URL" &
+  local p4=$!
+  wait $p1 $p2 $p3 $p4
   mark download
 }
 
@@ -162,6 +166,7 @@ phase_extract() {
   extract_one "gcc-${GCC_VER}.tar.xz"           "gcc-${GCC_VER}"
   extract_one "binutils-${BINUTILS_VER}.tar.xz" "binutils-${BINUTILS_VER}"
   extract_one "newlib-${NEWLIB_VER}.tar.gz"     "newlib-${NEWLIB_VER}"
+  extract_one "gdb-${GDB_VER}.tar.xz"           "gdb-${GDB_VER}"
   mark extract
 }
 
@@ -297,7 +302,47 @@ phase_gcc_final() {
   mark "$stamp"
 }
 
-# ---- Phase 8: smoke test (per target, using its default arch/abi) ----
+# ---- Phase 8: gdb (per target; --enable-sim provides <target>-run) ----
+# Uses a per-target hardlink copy of the gdb src tree, with gmp/mpfr symlinked
+# from gcc's already-downloaded prereqs so the top-level meta-build picks them
+# up as in-tree host modules (gdb-14 requires GMP 4.2+ / MPFR 3.1.0+ and we
+# don't want to require libmpfr-dev on the host).
+phase_gdb() {
+  local target="$1"
+  local stamp="gdb-$target"
+  if have_stamp "$stamp"; then log "gdb ($target): cached"; return 0; fi
+  log "configure + build gdb-${GDB_VER} for $target"
+  local gdb_src="$SRC/gdb-${GDB_VER}-$target"
+  if [ ! -d "$gdb_src" ]; then
+    cp -al "$SRC/gdb-${GDB_VER}" "$gdb_src"
+  fi
+  local prereq
+  for prereq in gmp mpfr; do
+    if [ ! -e "$gdb_src/$prereq" ]; then
+      ln -sfn "$SRC/gcc-${GCC_VER}/$prereq" "$gdb_src/$prereq"
+    fi
+  done
+  rm -rf "$BUILD/gdb-$target"
+  mkdir -p "$BUILD/gdb-$target"
+  cd "$BUILD/gdb-$target"
+  "$gdb_src/configure" \
+      --target="$target" \
+      --prefix="$PREFIX" \
+      --with-system-zlib \
+      --disable-nls \
+      --disable-werror \
+      --enable-sim \
+      --disable-binutils \
+      --disable-ld \
+      --disable-gas \
+      --disable-gprof \
+      --without-guile
+  make -j"$JOBS"
+  make install
+  mark "$stamp"
+}
+
+# ---- Phase 9: smoke test (per target, using its default arch/abi) ----
 phase_smoke() {
   log "smoke test"
   local tmp; tmp="$(mktemp -d)"
@@ -319,6 +364,18 @@ EOF
     file "$tmp/hello-cpp-${target}.elf"
     log "available multilibs (${target})"
     "$PREFIX/bin/${target}-gcc" -print-multi-lib
+    log "gdb / sim sanity (${target})"
+    "$PREFIX/bin/${target}-gdb" --version | head -1
+    if [ -x "$PREFIX/bin/${target}-gdb-add-index" ]; then
+      echo "${target}-gdb-add-index: ok"
+    else
+      echo "${target}-gdb-add-index: MISSING"
+    fi
+    if [ -x "$PREFIX/bin/${target}-run" ]; then
+      "$PREFIX/bin/${target}-run" "$tmp/hello-${target}.elf" || true
+    else
+      echo "${target}-run: MISSING (sim not built?)"
+    fi
   done
   rm -rf "$tmp"
 }
@@ -333,6 +390,7 @@ build_target() {
   phase_gcc_stage1 "$target" "$arch" "$abi" "$multilib"
   phase_newlib    "$target"
   phase_gcc_final  "$target" "$arch" "$abi" "$multilib"
+  phase_gdb       "$target"
 }
 
 # ---- Driver ----
