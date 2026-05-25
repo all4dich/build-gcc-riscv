@@ -379,6 +379,38 @@ EOF
   rm -rf "$tmp"
 }
 
+# ---- Phase 10: package PREFIX into a tar.gz next to the source tree ----
+# Runs after smoke test; set -e ensures we only reach here on success.
+# Uses pigz when available for parallel gzip (much faster on ~3-4 GB installs).
+phase_package() {
+  local name; name="$(basename "$PREFIX")"
+  local out="$WORK/${name}.tar.gz"
+  local gz=gzip
+  command -v pigz >/dev/null 2>&1 && gz=pigz
+  log "package: tar -C $WORK $name | $gz > $out"
+  tar -C "$WORK" -cf - "$name" | "$gz" > "$out.part"
+  mv "$out.part" "$out"
+  ls -lh "$out"
+}
+
+# ---- Phase 11: upload tarball ----
+# Disabled by default; pass `-u` (or set UPLOAD=1) to enable.
+# Override UPLOAD_URL to publish elsewhere.
+# Auth: if NEXUS_USER/NEXUS_PASS are set, they're passed via -u to curl;
+# otherwise curl falls back to ~/.netrc (--netrc-optional).
+phase_upload() {
+  if [ "${UPLOAD:-0}" = "0" ]; then log "upload: skipped (pass -u to enable)"; return 0; fi
+  local name; name="$(basename "$PREFIX")"
+  local tarball="$WORK/${name}.tar.gz"
+  local url="${UPLOAD_URL:-https://rebellions.dev/nexus/repository/riscv-toolchains/v${GCC_VER}/${name}.tar.gz}"
+  local auth=(--netrc-optional)
+  if [ -n "${NEXUS_USER:-}" ] && [ -n "${NEXUS_PASS:-}" ]; then
+    auth=(-u "${NEXUS_USER}:${NEXUS_PASS}")
+  fi
+  log "upload: $tarball -> $url"
+  curl -v --fail "${auth[@]}" --upload-file "$tarball" "$url"
+}
+
 # Build the four target-specific phases for one TARGETS spec.
 # Used by main() under `&` to run targets in parallel.
 build_target() {
@@ -394,6 +426,22 @@ build_target() {
 
 # ---- Driver ----
 main() {
+  # CLI flags:
+  #   -u   enable phase_upload (equivalent to UPLOAD=1)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -u) UPLOAD=1 ;;
+      --) shift; break ;;
+      -h|--help)
+        echo "usage: $0 [-u]" >&2
+        echo "  -u    upload the built tarball to UPLOAD_URL" >&2
+        exit 0 ;;
+      -*) echo "unknown option: $1" >&2; exit 2 ;;
+      *)  break ;;
+    esac
+    shift
+  done
+
   log "PREFIX=$PREFIX  JOBS=$JOBS  TARGETS=${TARGETS[*]}"
 
   # Surface where build/ lives. tmpfs is dramatically faster for the many-
@@ -439,6 +487,8 @@ main() {
   [ "$fail" -eq 0 ] || exit 1
 
   phase_smoke
+  phase_package
+  phase_upload
   log "DONE: toolchain(s) installed in $PREFIX"
   for spec in "${TARGETS[@]}"; do
     local target
