@@ -26,14 +26,13 @@ detect_jobs() {
 WORK="$(cd "$(dirname "$0")" && pwd)"
 
 # ---- Configurable knobs (override via env) ----
-PREFIX="${PREFIX:-$WORK/temp}"
-JOBS="${JOBS:-$(detect_jobs)}"
-
 GCC_VER="${GCC_VER:-13.3.0}"
 BINUTILS_VER="${BINUTILS_VER:-2.42}"
 NEWLIB_VER="${NEWLIB_VER:-4.4.0.20231231}"
 GDB_VER="${GDB_VER:-14.2}"
 
+PREFIX="${PREFIX:-$WORK/gcc-$GCC_VER-riscv}"
+JOBS="${JOBS:-$(detect_jobs)}"
 # Target specs: each entry is "TARGET|ARCH|ABI|MULTILIB_GEN".
 # MULTILIB_GEN syntax: "<arch>-<abi>--;..." (trailing "--" = no extra flags).
 # Override by exporting TARGETS as a bash array before running.
