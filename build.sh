@@ -83,6 +83,26 @@ log() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 have_stamp() { [ -f "$STAMP/$1" ]; }
 mark() { touch "$STAMP/$1"; }
 
+# Cheap directory-tree copy.
+#   Linux:  hardlinks (`cp -al`) — sub-second, ~no extra disk.
+#   macOS:  APFS clonefile (`cp -cR`) — same cost profile, since BSD cp has no -l.
+cheap_tree_copy() {
+  local src="$1" dst="$2"
+  if [ "$IS_MAC" -eq 1 ]; then
+    cp -cR "$src" "$dst"
+  else
+    cp -al "$src" "$dst"
+  fi
+}
+
+# Replace a single file, breaking any hardlink to the source.
+# Portable substitute for GNU `cp --remove-destination`.
+replace_file() {
+  local src="$1" dst="$2"
+  rm -f "$dst"
+  cp "$src" "$dst"
+}
+
 # Per-target gcc src tree path. Targets build in parallel, and each gcc
 # configure mutates gcc/config/riscv/t-elf-multilib (see write_multilib_config
 # below), so the trees must be separate to avoid a race.
@@ -97,11 +117,11 @@ setup_target_src() {
   local shared="$SRC/gcc-${GCC_VER}"
   if [ ! -d "$src_dir" ]; then
     log "preparing per-target gcc src tree for $target"
-    cp -al "$shared" "$src_dir"
+    cheap_tree_copy "$shared" "$src_dir"
     # Break the hardlink for t-elf-multilib so a per-target rewrite doesn't
     # clobber the other target's tree.
     local mf="$src_dir/gcc/config/riscv/t-elf-multilib"
-    cp --remove-destination "$shared/gcc/config/riscv/t-elf-multilib" "$mf"
+    replace_file "$shared/gcc/config/riscv/t-elf-multilib" "$mf"
   fi
 }
 
@@ -451,12 +471,15 @@ main() {
   log "PREFIX=$PREFIX  JOBS=$JOBS  TARGETS=${TARGETS[*]}"
 
   # Surface where build/ lives. tmpfs is dramatically faster for the many-
-  # small-files I/O of gcc/libstdc++ builds.
-  if mount | grep -qE " on $BUILD type tmpfs"; then
-    log "build/ is on tmpfs (fast)"
-  else
-    log "build/ is on disk; for ~2-4 min faster builds, mount tmpfs:
-       sudo mount -t tmpfs -o size=20G tmpfs $BUILD"
+  # small-files I/O of gcc/libstdc++ builds. tmpfs is Linux-only; macOS APFS
+  # is already fast enough for this workload, so skip the hint there.
+  if [ "$IS_MAC" -eq 0 ]; then
+    if mount | grep -qE " on $BUILD type tmpfs"; then
+      log "build/ is on tmpfs (fast)"
+    else
+      log "build/ is on disk; for ~2-4 min faster builds, mount tmpfs:
+         sudo mount -t tmpfs -o size=20G tmpfs $BUILD"
+    fi
   fi
 
   phase_download
