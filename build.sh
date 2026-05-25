@@ -33,6 +33,11 @@ GDB_VER="${GDB_VER:-14.2}"
 
 PREFIX="${PREFIX:-$WORK/gcc-$GCC_VER-riscv}"
 JOBS="${JOBS:-$(detect_jobs)}"
+
+# Host tag for artifact filenames: "<kernel-lowercase>-<machine>", e.g.
+# "linux-x86_64", "darwin-arm64". Lets the same Nexus path host artifacts
+# from multiple builder hosts without collision.
+HOST_TAG="${HOST_TAG:-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)}"
 # Target specs: each entry is "TARGET|ARCH|ABI|MULTILIB_GEN".
 # MULTILIB_GEN syntax: "<arch>-<abi>--;..." (trailing "--" = no extra flags).
 # Override by exporting TARGETS as a bash array before running.
@@ -384,7 +389,7 @@ EOF
 # Uses pigz when available for parallel gzip (much faster on ~3-4 GB installs).
 phase_package() {
   local name; name="$(basename "$PREFIX")"
-  local out="$WORK/${name}.tar.gz"
+  local out="$WORK/${name}-${HOST_TAG}.tar.gz"
   local gz=gzip
   command -v pigz >/dev/null 2>&1 && gz=pigz
   log "package: tar -C $WORK $name | $gz > $out"
@@ -401,8 +406,9 @@ phase_package() {
 phase_upload() {
   if [ "${UPLOAD:-0}" = "0" ]; then log "upload: skipped (pass -u to enable)"; return 0; fi
   local name; name="$(basename "$PREFIX")"
-  local tarball="$WORK/${name}.tar.gz"
-  local url="${UPLOAD_URL:-https://rebellions.dev/nexus/repository/riscv-toolchains/v${GCC_VER}/${name}.tar.gz}"
+  local artifact="${name}-${HOST_TAG}.tar.gz"
+  local tarball="$WORK/${artifact}"
+  local url="${UPLOAD_URL:-https://rebellions.dev/nexus/repository/riscv-toolchains/v${GCC_VER}/${artifact}}"
   local auth=(--netrc-optional)
   if [ -n "${NEXUS_USER:-}" ] && [ -n "${NEXUS_PASS:-}" ]; then
     auth=(-u "${NEXUS_USER}:${NEXUS_PASS}")
