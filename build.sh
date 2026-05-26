@@ -30,6 +30,7 @@ GCC_VER="${GCC_VER:-13.3.0}"
 BINUTILS_VER="${BINUTILS_VER:-2.42}"
 NEWLIB_VER="${NEWLIB_VER:-4.4.0.20231231}"
 GDB_VER="${GDB_VER:-14.2}"
+CMAKE_VER="${CMAKE_VER:-3.22.1}"
 
 PREFIX="${PREFIX:-$WORK/gcc-$GCC_VER-riscv}"
 JOBS="${JOBS:-$(detect_jobs)}"
@@ -76,6 +77,7 @@ GCC_URL="https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz"
 BINUTILS_URL="https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VER}.tar.xz"
 NEWLIB_URL="https://sourceware.org/pub/newlib/newlib-${NEWLIB_VER}.tar.gz"
 GDB_URL="https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VER}.tar.xz"
+CMAKE_URL="https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}.tar.gz"
 
 # ---- Helpers ----
 log() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
@@ -151,7 +153,9 @@ phase_download() {
   local p3=$!
   download "$GDB_URL" &
   local p4=$!
-  wait $p1 $p2 $p3 $p4
+  download "$CMAKE_URL" &
+  local p5=$!
+  wait $p1 $p2 $p3 $p4 $p5
   mark download
 }
 
@@ -170,6 +174,7 @@ phase_extract() {
   extract_one "binutils-${BINUTILS_VER}.tar.xz" "binutils-${BINUTILS_VER}"
   extract_one "newlib-${NEWLIB_VER}.tar.gz"     "newlib-${NEWLIB_VER}"
   extract_one "gdb-${GDB_VER}.tar.xz"           "gdb-${GDB_VER}"
+  extract_one "cmake-${CMAKE_VER}.tar.gz"       "cmake-${CMAKE_VER}"
   mark extract
 }
 
@@ -315,7 +320,39 @@ phase_gdb() {
   mark "$stamp"
 }
 
-# ---- Phase 9: smoke test (per target, using its default arch/abi) ----
+# ---- Phase 9: cmake (host tool, installed into PREFIX, static binaries) ----
+# Statically links cmake/ctest/cpack so they're portable across glibc versions
+# on the deployed host. -static is Linux-only; macOS doesn't permit a fully
+# static libSystem link, so we drop the flag there and accept a dynamic binary.
+phase_cmake() {
+  if have_stamp cmake; then log "cmake: cached"; return 0; fi
+  log "configure + build cmake-${CMAKE_VER}"
+  rm -rf "$BUILD/cmake"
+  mkdir -p "$BUILD/cmake"
+  cd "$BUILD/cmake"
+  # Static libgcc/libstdc++ make the binary portable across glibc versions
+  # without forcing a fully-static link (which fails on distros that ship
+  # only libssl.so). libc and libssl stay dynamic so file(DOWNLOAD) /
+  # FetchContent over HTTPS keeps working. This matches how Kitware's
+  # official cmake binaries are linked.
+  local cmake_extra=()
+  if [ "$IS_MAC" -eq 0 ]; then
+    cmake_extra+=(-DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++")
+  fi
+  "$SRC/cmake-${CMAKE_VER}/bootstrap" \
+      --prefix="$PREFIX" \
+      --parallel="$JOBS" \
+      --no-system-libs \
+      -- \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=OFF \
+      "${cmake_extra[@]}"
+  make -j"$JOBS"
+  make install
+  mark cmake
+}
+
+# ---- Phase 10: smoke test (per target, using its default arch/abi) ----
 phase_smoke() {
   log "smoke test"
   local tmp; tmp="$(mktemp -d)"
@@ -353,7 +390,7 @@ EOF
   rm -rf "$tmp"
 }
 
-# ---- Phase 10: package PREFIX into a tar.gz next to the source tree ----
+# ---- Phase 11: package PREFIX into a tar.gz next to the source tree ----
 # Runs after smoke test; set -e ensures we only reach here on success.
 # Uses pigz when available for parallel gzip (much faster on ~3-4 GB installs).
 phase_package() {
@@ -367,7 +404,7 @@ phase_package() {
   ls -lh "$out"
 }
 
-# ---- Phase 11: upload tarball ----
+# ---- Phase 12: upload tarball ----
 # Disabled by default; pass `-u` (or set UPLOAD=1) to enable.
 # Override UPLOAD_URL to publish elsewhere.
 # Auth: if NEXUS_USER/NEXUS_PASS are set, they're passed via -u to curl;
@@ -461,6 +498,7 @@ main() {
   done
   [ "$fail" -eq 0 ] || exit 1
 
+  phase_cmake
   phase_smoke
   phase_package
   phase_upload
