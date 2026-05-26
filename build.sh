@@ -43,8 +43,7 @@ HOST_TAG="${HOST_TAG:-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)}"
 # Override by exporting TARGETS as a bash array before running.
 if [ -z "${TARGETS+x}" ]; then
   TARGETS=(
-    "riscv64-unknown-elf|rv64gc|lp64d|rv32imac-ilp32--;rv32imafdc-ilp32d--;rv64imac-lp64--;rv64imafdc-lp64d--"
-    "riscv32-unknown-elf|rv32gc|ilp32d|rv32imac-ilp32--;rv32imafc-ilp32f--;rv32imafdc-ilp32d--"
+    "riscv32-unknown-elf|rv64gc|lp64d|rv32imac-ilp32--;rv32imafdc-ilp32d--;rv64imac-lp64--;rv64imafdc-lp64d--"
   )
 fi
 
@@ -198,8 +197,6 @@ phase_binutils() {
       --prefix="$PREFIX" \
       --with-sysroot \
       --with-system-zlib \
-      --disable-nls \
-      --disable-werror \
       --enable-multilib
   make -j"$JOBS"
   make install
@@ -227,16 +224,6 @@ phase_gcc_stage1() {
       --with-newlib \
       --with-system-zlib \
       --enable-languages=c \
-      --disable-shared \
-      --disable-threads \
-      --disable-libssp \
-      --disable-libgomp \
-      --disable-libmudflap \
-      --disable-libquadmath \
-      --disable-libatomic \
-      --disable-decimal-float \
-      --disable-nls \
-      --disable-bootstrap \
       --enable-multilib
   make -j"$JOBS" all-gcc
   make install-gcc
@@ -257,18 +244,12 @@ phase_newlib() {
   "$SRC/newlib-${NEWLIB_VER}/configure" \
       --target="$target" \
       --prefix="$PREFIX" \
-      --disable-newlib-supplied-syscalls \
       --enable-newlib-reent-small \
-      --disable-newlib-fvwrite-in-streamio \
-      --disable-newlib-fseek-optimization \
-      --disable-newlib-wide-orient \
       --enable-newlib-nano-malloc \
-      --disable-newlib-unbuf-stream-opt \
       --enable-lite-exit \
       --enable-newlib-global-atexit \
       --enable-newlib-nano-formatted-io \
-      --enable-multilib \
-      --disable-nls
+      --enable-multilib
   make -j"$JOBS"
   make install
   mark "$stamp"
@@ -294,12 +275,6 @@ phase_gcc_final() {
       --with-newlib \
       --with-system-zlib \
       --enable-languages=c,c++ \
-      --disable-shared \
-      --disable-threads \
-      --disable-libssp \
-      --disable-libgomp \
-      --disable-nls \
-      --disable-bootstrap \
       --enable-multilib
   make -j"$JOBS"
   make install
@@ -333,13 +308,7 @@ phase_gdb() {
       --target="$target" \
       --prefix="$PREFIX" \
       --with-system-zlib \
-      --disable-nls \
-      --disable-werror \
       --enable-sim \
-      --disable-binutils \
-      --disable-ld \
-      --disable-gas \
-      --disable-gprof \
       --without-guile
   make -j"$JOBS"
   make install
