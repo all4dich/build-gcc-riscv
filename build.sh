@@ -38,6 +38,17 @@ JOBS="${JOBS:-$(detect_jobs)}"
 # "linux-x86_64", "darwin-arm64". Lets the same Nexus path host artifacts
 # from multiple builder hosts without collision.
 HOST_TAG="${HOST_TAG:-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)}"
+# Build timestamp embedded in the artifact filename (UTC, "YYYYmmdd-HHMMSS")
+# so repeated builds of the same version/host don't overwrite each other in
+# Nexus. Override BUILD_DATE to pin a specific value.
+BUILD_DATE="${BUILD_DATE:-$(date -u +%Y%m%d-%H%M%S)}"
+# Canonical artifact filename, shared by phase_package and phase_upload:
+#   gcc-<GCC_VER>-riscv-<HOST_TAG>-<BUILD_DATE>.tar.gz   (default)
+#   gcc-<GCC_VER>-riscv-<HOST_TAG>.tar.gz                (release, `-u`)
+# The default name is computed in main() after flag parsing, since release
+# builds (`-u`) omit the BUILD_DATE suffix. An explicit ARTIFACT env override
+# is honored as-is.
+ARTIFACT="${ARTIFACT:-}"
 # Target specs: each entry is "TARGET|ARCH|ABI|MULTILIB_GEN".
 # MULTILIB_GEN syntax: "<arch>-<abi>--;..." (trailing "--" = no extra flags).
 # Override by exporting TARGETS as a bash array before running.
@@ -358,7 +369,7 @@ EOF
 # Uses pigz when available for parallel gzip (much faster on ~3-4 GB installs).
 phase_package() {
   local name; name="$(basename "$PREFIX")"
-  local out="$WORK/${name}-${HOST_TAG}.tar.gz"
+  local out="$WORK/${ARTIFACT}"
   local gz=gzip
   command -v pigz >/dev/null 2>&1 && gz=pigz
   log "package: tar -C $WORK $name | $gz > $out"
@@ -368,16 +379,24 @@ phase_package() {
 }
 
 # ---- Phase 11: upload tarball ----
-# Disabled by default; pass `-u` (or set UPLOAD=1) to enable.
-# Override UPLOAD_URL to publish elsewhere.
+# Enabled by `-u` (release) or UPLOAD=1 (staging). Destination path:
+#   - default (UPLOAD=1, no -u): staging, ".../riscv-toolchains/upload/v<VER>/"
+#   - release (-u):              original, ".../riscv-toolchains/v<VER>/"
+# `-u` sets RELEASE=1 (see main), which picks the original path. Override
+# UPLOAD_URL to publish to an explicit location (takes precedence over both).
 # Auth: if NEXUS_USER/NEXUS_PASS are set, they're passed via -u to curl;
 # otherwise curl falls back to ~/.netrc (--netrc-optional).
 phase_upload() {
-  if [ "${UPLOAD:-0}" = "0" ]; then log "upload: skipped (pass -u to enable)"; return 0; fi
-  local name; name="$(basename "$PREFIX")"
-  local artifact="${name}-${HOST_TAG}.tar.gz"
-  local tarball="$WORK/${artifact}"
-  local url="${UPLOAD_URL:-https://rebellions.dev/nexus/repository/riscv-toolchains/v${GCC_VER}/${artifact}}"
+  if [ "${UPLOAD:-0}" = "0" ]; then log "upload: skipped (pass -u or set UPLOAD=1)"; return 0; fi
+  local tarball="$WORK/${ARTIFACT}"
+  local repo="https://rebellions.dev/nexus/repository/riscv-toolchains"
+  local default_url
+  if [ "${RELEASE:-0}" = "1" ]; then
+    default_url="$repo/v${GCC_VER}/${ARTIFACT}"
+  else
+    default_url="$repo/upload/v${GCC_VER}/${ARTIFACT}"
+  fi
+  local url="${UPLOAD_URL:-$default_url}"
   local auth=(--netrc-optional)
   if [ -n "${NEXUS_USER:-}" ] && [ -n "${NEXUS_PASS:-}" ]; then
     auth=(-u "${NEXUS_USER}:${NEXUS_PASS}")
@@ -402,20 +421,33 @@ build_target() {
 # ---- Driver ----
 main() {
   # CLI flags:
-  #   -u   enable phase_upload (equivalent to UPLOAD=1)
+  #   -u   upload to the original (release) URL; implies UPLOAD=1.
+  #        Without -u, set UPLOAD=1 to upload to the staging ("/upload/") path.
   while [ $# -gt 0 ]; do
     case "$1" in
-      -u) UPLOAD=1 ;;
+      -u) UPLOAD=1; RELEASE=1 ;;
       --) shift; break ;;
       -h|--help)
         echo "usage: $0 [-u]" >&2
-        echo "  -u    upload the built tarball to UPLOAD_URL" >&2
+        echo "  -u    upload the tarball to the original (release) URL" >&2
+        echo "        (without -u, set UPLOAD=1 to upload to the staging path)" >&2
         exit 0 ;;
       -*) echo "unknown option: $1" >&2; exit 2 ;;
       *)  break ;;
     esac
     shift
   done
+
+  # Resolve the artifact name now that flags are parsed. Release builds (`-u`)
+  # produce a stable name without the BUILD_DATE suffix; other builds append
+  # BUILD_DATE so repeated staging uploads don't overwrite each other.
+  if [ -z "$ARTIFACT" ]; then
+    if [ "${RELEASE:-0}" = "1" ]; then
+      ARTIFACT="$(basename "$PREFIX")-${HOST_TAG}.tar.gz"
+    else
+      ARTIFACT="$(basename "$PREFIX")-${HOST_TAG}-${BUILD_DATE}.tar.gz"
+    fi
+  fi
 
   log "PREFIX=$PREFIX  JOBS=$JOBS  TARGETS=${TARGETS[*]}"
 
