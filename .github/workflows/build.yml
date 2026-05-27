@@ -3,18 +3,28 @@ name: build-riscv-toolchain
 # Build the RISC-V GCC toolchain and publish the tarball to Nexus.
 #
 # The upload destination is chosen by build.sh (see phase_upload):
+#   - pull request   -> UPLOAD=1 (no -u): staging path ".../upload/v<VER>/"
 #   - push to main  -> UPLOAD=1 (no -u): staging path ".../upload/v<VER>/"
 #   - push tag v*    -> build.sh -u:      original path ".../v<VER>/"
 on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
+    branches: [main]
 
 jobs:
   build:
     runs-on: [self-hosted, build-gcc-riscv]
     timeout-minutes: 350
     steps:
+      # Self-hosted runners reuse the workspace between runs; wipe it so each
+      # build starts from a clean tree (no leftover artifacts from prior runs).
+      - name: Clear workspace
+        run: |
+          shopt -s dotglob
+          rm -rf "${{ github.workspace }}"/*
+
       - uses: actions/checkout@v4
       - name: Install build dependencies
         run: |
@@ -23,8 +33,9 @@ jobs:
             build-essential python3 texinfo bison flex \
             wget curl zlib1g-dev libexpat1-dev pigz file
 
-      # Default branch builds upload to the staging path ("/upload/" prefix);
-      # UPLOAD=1 enables the upload, build.sh picks the staging URL.
+      # Pull requests and default-branch pushes upload to the staging path
+      # ("/upload/" prefix); UPLOAD=1 enables the upload, build.sh picks the
+      # staging URL.
       - name: Build and upload (staging)
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         env:
