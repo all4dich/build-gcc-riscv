@@ -26,7 +26,7 @@ detect_jobs() {
 WORK="$(cd "$(dirname "$0")" && pwd)"
 
 # ---- Configurable knobs (override via env) ----
-GCC_VER="${GCC_VER:-13.3.0}"
+GCC_VER="${GCC_VER:-13.4.0}"
 BINUTILS_VER="${BINUTILS_VER:-2.42}"
 NEWLIB_VER="${NEWLIB_VER:-4.4.0.20231231}"
 GDB_VER="${GDB_VER:-14.2}"
